@@ -13,6 +13,7 @@ Every poll the service:
 3. Creates a task in that project:
    - **Title:** the subject.
    - **Description:** the plain-text body (decoded, so base64 and quoted-printable mail works).
+   - **Attachments:** every file part of the message (inline images included) is uploaded to Kaneo and added to the task as an attachment card; files over `MAX_ATTACHMENT_MB` are skipped with a note instead.
    - **Due date:** taken from the subject if it contains a `dd-mm-yyyy hh:mm` timestamp, read in the container's `TZ`.
 4. Moves the message:
    - to `OUT` when the task was created;
@@ -29,6 +30,17 @@ Every poll the service:
 Without `X-Kaneo-Column`, the task goes to `KANEO_DEFAULT_COLUMN` if set, otherwise to the column named `Mail` if the project has one, otherwise to the first column on the board.
 
 Most mail clients cannot add custom headers by hand. For Thunderbird, [Header Tools Lite](https://addons.thunderbird.net/en-US/thunderbird/addon/header-tools-lite/) works. Automated senders (scripts, forms, other services) can set them directly.
+
+## Attachments
+
+Every file part of an email — regular attachments and inline images alike —
+becomes a Kaneo attachment on the task: the mailer stages the file through the
+Kaneo API, uploads it to the instance's object storage, and adds an attachment
+card to the task description linking to the stored file.
+
+Attachments larger than `MAX_ATTACHMENT_MB` (25 MB by default, 0 disables the
+cap) are skipped; the task description names them so nothing disappears
+silently. The mail server's own message-size limit applies on top of this one.
 
 ## Mailbox setup
 
@@ -70,6 +82,7 @@ All configuration comes from environment variables. See [`.env.example`](.env.ex
 | `POLL_INTERVAL`            | `300`                           | Seconds between polls. `0` runs once and exits (for cron or CI jobs).       |
 | `LOG_LEVEL`                | `info`                          | `trace`, `debug`, `info`, `warn`, `error`. `trace` includes IMAP logs.      |
 | `TZ`                       | `Europe/Amsterdam` in the image | Timezone used to read due dates from subjects.                              |
+| `MAX_ATTACHMENT_MB`        | `25`                             | Skip mail attachments over this size in MB; `0` disables the cap.           |
 
 ## Running
 

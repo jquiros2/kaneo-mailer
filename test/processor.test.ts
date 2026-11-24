@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { KaneoError, type Column, type KaneoClient } from '../src/kaneo';
-import type { TaskMail } from '../src/message';
+import type { MailAttachment, TaskMail } from '../src/message';
 import { Processor, resolveColumn } from '../src/processor';
 
 const column = (slug: string, position: number, name = slug): Column => ({
@@ -13,19 +13,50 @@ const column = (slug: string, position: number, name = slug): Column => ({
 
 const columns = [column('done', 2, 'Done'), column('to-do', 0, 'To Do'), column('mail', 1, 'Mail')];
 
+const attachment = (overrides: Partial<MailAttachment> = {}): MailAttachment => ({
+  filename: 'logo.png',
+  contentType: 'image/png',
+  size: 4,
+  content: Buffer.from('DATA'),
+  ...overrides,
+});
+
 const mail = (overrides: Partial<TaskMail> = {}): TaskMail => ({
   projectId: 'p1',
   column: null,
   title: 'Title',
   description: 'Body',
   dueDate: null,
+  attachments: [],
   ...overrides,
 });
 
-function fakeKaneo(cols: Column[] | KaneoError = columns, create: KaneoError | null = null) {
+function fakeKaneo(
+  cols: Column[] | KaneoError = columns,
+  create: KaneoError | null = null,
+  uploadError: KaneoError | null = null,
+) {
   const getColumns = vi.fn(() => (cols instanceof KaneoError ? Promise.reject(cols) : Promise.resolve(cols)));
   const createTask = vi.fn(() => (create ? Promise.reject(create) : Promise.resolve({ id: 't1' })));
-  return { getColumns, createTask, kaneo: { getColumns, createTask } as unknown as KaneoClient };
+  const stageDraftAsset = vi.fn(() =>
+    uploadError
+      ? Promise.reject(uploadError)
+      : Promise.resolve({
+          key: 'k1',
+          uploadUrl: 'https://upload.example/put',
+          headers: { 'Content-Type': 'image/png' },
+        }),
+  );
+  const putUploadBytes = vi.fn(() => Promise.resolve());
+  const finalizeDraftAsset = vi.fn(() => Promise.resolve({ id: 'a1', url: 'https://kaneo.example.com/api/asset/a1' }));
+  const kaneo = {
+    getColumns,
+    createTask,
+    stageDraftAsset,
+    putUploadBytes,
+    finalizeDraftAsset,
+  } as unknown as KaneoClient;
+  return { getColumns, createTask, stageDraftAsset, putUploadBytes, finalizeDraftAsset, kaneo };
 }
 
 describe('resolveColumn', () => {
@@ -132,5 +163,87 @@ describe('Processor', () => {
     await processor.process(mail());
     await processor.process(mail({ projectId: 'p2' }));
     expect(getColumns).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('Processor attachments', () => {
+  it('uploads mail attachments and links them to the task', async () => {
+    const { kaneo, stageDraftAsset, putUploadBytes, finalizeDraftAsset, createTask } = fakeKaneo();
+    const att = attachment();
+    const outcome = await new Processor(kaneo).process(mail({ attachments: [att] }));
+
+    expect(outcome).toEqual({ state: 'accepted', taskId: 't1' });
+    expect(stageDraftAsset).toHaveBeenCalledWith('p1', att);
+    expect(putUploadBytes).toHaveBeenCalledWith('https://upload.example/put', att.content, {
+      'Content-Type': 'image/png',
+    });
+    expect(finalizeDraftAsset).toHaveBeenCalledWith('p1', att, 'k1');
+    expect(createTask).toHaveBeenCalledWith(
+      'p1',
+      expect.objectContaining({
+        draftAssetIds: ['a1'],
+        description: expect.stringContaining(
+          '<kaneo-attachment url="https://kaneo.example.com/api/asset/a1" filename="logo.png"',
+        ),
+      }),
+    );
+  });
+
+  it('appends the attachment card after the original body', async () => {
+    const { kaneo, createTask } = fakeKaneo();
+    await new Processor(kaneo).process(mail({ description: 'Brief', attachments: [attachment()] }));
+
+    expect(createTask).toHaveBeenCalledWith(
+      'p1',
+      expect.objectContaining({ description: expect.stringMatching(/^Brief\n<kaneo-attachment/) }),
+    );
+  });
+
+  it('notes skipped oversize attachments instead of uploading them', async () => {
+    const { kaneo, stageDraftAsset, createTask } = fakeKaneo();
+    const processor = new Processor(kaneo, { maxAttachmentMb: 25 });
+    const big = attachment({ filename: 'huge.tif', contentType: 'image/tiff', size: 40 * 1024 * 1024 });
+    const outcome = await processor.process(mail({ attachments: [big] }));
+
+    expect(outcome).toEqual({ state: 'accepted', taskId: 't1' });
+    expect(stageDraftAsset).not.toHaveBeenCalled();
+    expect(createTask).toHaveBeenCalledWith(
+      'p1',
+      expect.objectContaining({
+        description: expect.stringContaining('skipped attachment "huge.tif": exceeds the 25 MB limit'),
+      }),
+    );
+  });
+
+  it('retries when attachment staging fails temporarily', async () => {
+    const { kaneo, stageDraftAsset, createTask } = fakeKaneo();
+    const processor = new Processor(kaneo);
+    stageDraftAsset.mockRejectedValueOnce(new KaneoError('Image uploads are not configured', 503));
+    const outcome = await processor.process(mail({ attachments: [attachment()] }));
+
+    expect(outcome).toEqual({ state: 'retry', reason: 'Image uploads are not configured' });
+    expect(createTask).not.toHaveBeenCalled();
+  });
+
+  it('rejects when attachment staging fails permanently', async () => {
+    const { kaneo, stageDraftAsset } = fakeKaneo();
+    stageDraftAsset.mockRejectedValueOnce(new KaneoError('Invalid upload', 400));
+    expect(await new Processor(kaneo).process(mail({ attachments: [attachment()] }))).toEqual({
+      state: 'rejected',
+      reason: 'Invalid upload',
+    });
+  });
+
+  it('escapes quotes and ampersands in attachment attributes', async () => {
+    const { kaneo, createTask } = fakeKaneo();
+    const weird = attachment({ filename: 'a&b "v2".png' });
+    await new Processor(kaneo).process(mail({ attachments: [weird] }));
+
+    expect(createTask).toHaveBeenCalledWith(
+      'p1',
+      expect.objectContaining({
+        description: expect.stringContaining('filename="a&amp;b &quot;v2&quot;.png"'),
+      }),
+    );
   });
 });

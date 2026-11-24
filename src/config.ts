@@ -15,6 +15,8 @@ export interface Config {
     /** Used when a message has no X-Kaneo-Column header. */
     defaultColumn: string | null;
   };
+  /** Megabytes; mail attachments above this are skipped (noted on the task). 0 disables the cap. */
+  maxAttachmentMb: number;
   /** Seconds between polls; 0 means run once and exit. */
   pollInterval: number;
   logLevel: string;
@@ -38,9 +40,9 @@ function integer(env: NodeJS.ProcessEnv, key: string, fallback: number): number 
   return value;
 }
 
-function boolean(env: NodeJS.ProcessEnv, key: string, fallback: boolean): boolean {
+function boolean(env: NodeJS.ProcessEnv, key: string, fallback: number | string | boolean): boolean {
   const raw = env[key]?.trim().toLowerCase();
-  if (!raw) return fallback;
+  if (!raw) return fallback as boolean;
   if (['true', '1', 'yes'].includes(raw)) return true;
   if (['false', '0', 'no'].includes(raw)) return false;
   throw new ConfigError(`${key} must be true or false`);
@@ -71,6 +73,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       defaultProjectId: env['KANEO_DEFAULT_PROJECT_ID']?.trim() || null,
       defaultColumn: env['KANEO_DEFAULT_COLUMN']?.trim() || null,
     },
+    maxAttachmentMb: integer(env, 'MAX_ATTACHMENT_MB', 25),
     pollInterval: integer(env, 'POLL_INTERVAL', 300),
     logLevel: env['LOG_LEVEL']?.trim() || 'info',
   };

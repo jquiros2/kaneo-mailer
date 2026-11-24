@@ -73,4 +73,78 @@ describe('KaneoClient', () => {
   ])('status %i permanent=%s', (status, permanent) => {
     expect(new KaneoError('x', status).permanent).toBe(permanent);
   });
+
+  it('stages a draft attachment with the expected body', async () => {
+    const { fetchMock, kaneo } = client(
+      json({ key: 'k1', uploadUrl: 'https://upload.example/put', headers: { 'Content-Type': 'image/png' } }),
+    );
+    const file = { filename: 'logo.png', contentType: 'image/png', size: 4, content: Buffer.from('DATA') };
+    const staged = await kaneo.stageDraftAsset('p1', file);
+
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe('https://kaneo.example.com/api/task/draft-upload/p1');
+    expect(init?.method).toBe('POST');
+    expect(init?.headers).toMatchObject({ Authorization: 'Bearer key' });
+    expect(JSON.parse(init?.body as string)).toEqual({
+      filename: 'logo.png',
+      contentType: 'image/png',
+      size: 4,
+      surface: 'description',
+    });
+    expect(staged).toEqual({
+      key: 'k1',
+      uploadUrl: 'https://upload.example/put',
+      headers: { 'Content-Type': 'image/png' },
+    });
+  });
+
+  it('uploads bytes to the presigned URL without credentials', async () => {
+    const { fetchMock, kaneo } = client(new Response(null, { status: 200 }));
+    await kaneo.putUploadBytes('https://upload.example/put', Buffer.from('DATA'), { 'Content-Type': 'image/png' });
+
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe('https://upload.example/put');
+    expect(init?.method).toBe('PUT');
+    expect(init?.headers).toEqual({ 'Content-Type': 'image/png' });
+    expect(new TextDecoder().decode(init?.body as Uint8Array)).toBe('DATA');
+  });
+
+  it('maps a failed upload to a permanent KaneoError', async () => {
+    const { kaneo } = client(new Response('denied', { status: 403 }));
+    const error = await kaneo
+      .putUploadBytes('https://upload.example/put', Buffer.from('D'), { 'Content-Type': 'text/plain' })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KaneoError);
+    expect((error as KaneoError).status).toBe(403);
+    expect((error as KaneoError).permanent).toBe(true);
+  });
+
+  it('finalizes a staged asset and returns the stable asset url', async () => {
+    const { fetchMock, kaneo } = client(json({ id: 'a1', url: 'https://kaneo.example.com/api/asset/a1' }));
+    const file = { filename: 'logo.png', contentType: 'image/png', size: 4, content: Buffer.from('DATA') };
+    const finalized = await kaneo.finalizeDraftAsset('p1', file, 'k1');
+
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe('https://kaneo.example.com/api/task/draft-upload/p1/finalize');
+    expect(JSON.parse(init?.body as string)).toEqual({
+      key: 'k1',
+      filename: 'logo.png',
+      contentType: 'image/png',
+      size: 4,
+      surface: 'description',
+    });
+    expect(finalized).toEqual({ id: 'a1', url: 'https://kaneo.example.com/api/asset/a1' });
+  });
+
+  it('includes draft asset ids when creating a task', async () => {
+    const { fetchMock, kaneo } = client(json({ id: 't1' }));
+    await kaneo.createTask('p1', { title: 'T', description: 'D', status: 'mail', draftAssetIds: ['a1'] });
+    expect(JSON.parse(fetchMock.mock.calls[0]![1]?.body as string)).toMatchObject({ draftAssetIds: ['a1'] });
+  });
+
+  it('omits draft asset ids when there are none', async () => {
+    const { fetchMock, kaneo } = client(json({ id: 't1' }));
+    await kaneo.createTask('p1', { title: 'T', description: 'D', status: 'mail' });
+    expect(JSON.parse(fetchMock.mock.calls[0]![1]?.body as string)).not.toHaveProperty('draftAssetIds');
+  });
 });

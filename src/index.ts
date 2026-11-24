@@ -51,6 +51,7 @@ async function main(): Promise<void> {
   const processor = new Processor(kaneo, {
     projectId: config.kaneo.defaultProjectId,
     column: config.kaneo.defaultColumn,
+    maxAttachmentMb: config.maxAttachmentMb,
   });
 
   if (config.pollInterval === 0) {

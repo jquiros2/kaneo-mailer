@@ -12,6 +12,29 @@ export interface CreateTaskInput {
   /** Slug of the target column. */
   status: string;
   dueDate?: string;
+  /** Ids of staged draft assets (email attachments) to link to the task. */
+  draftAssetIds?: string[];
+}
+
+export interface FileUpload {
+  filename: string;
+  contentType: string;
+  size: number;
+  content: Buffer;
+}
+
+export interface StagedUpload {
+  /** Storage key assigned by Kaneo; also the finalize payload's `key`. */
+  key: string;
+  /** Presigned PUT target. Send exactly the headers returned alongside it. */
+  uploadUrl: string;
+  headers: Record<string, string>;
+}
+
+export interface FinalizedAsset {
+  id: string;
+  /** Stable, authenticated URL of the stored asset (`/api/asset/<id>`). */
+  url: string;
 }
 
 export interface Task {
@@ -34,14 +57,16 @@ export class KaneoError extends Error {
   }
 
   /**
-   * True when the request itself is wrong (unknown project or column, no access),
-   * so retrying the same mail will never succeed. Auth, billing, rate limit and
-   * server errors are treated as temporary.
+   * True when the request itself is wrong (unknown project or column, no access,
+   * invalid upload), so retrying the same mail will never succeed. Auth, billing,
+   * rate limit and server errors are treated as temporary.
    */
   get permanent(): boolean {
     return this.status === 400 || this.status === 403 || this.status === 404;
   }
 }
+
+const UPLOAD_TIMEOUT_MS = 120_000;
 
 export class KaneoClient {
   constructor(
@@ -62,6 +87,57 @@ export class KaneoClient {
       status: input.status,
       priority: 'no-priority',
       ...(input.dueDate ? { dueDate: input.dueDate } : {}),
+      ...(input.draftAssetIds?.length ? { draftAssetIds: input.draftAssetIds } : {}),
+    });
+  }
+
+  /**
+   * Stages a draft attachment before the task exists. Staged assets are private
+   * to the uploader and expire after 24 hours, so stage and create must happen
+   * in the same run.
+   */
+  stageDraftAsset(projectId: string, file: FileUpload): Promise<StagedUpload> {
+    return this.request<StagedUpload>('POST', `/task/draft-upload/${encodeURIComponent(projectId)}`, {
+      filename: file.filename,
+      contentType: file.contentType,
+      size: file.size,
+      surface: 'description',
+    });
+  }
+
+  /**
+   * Uploads the raw bytes to the presigned URL. The request must carry exactly
+   * the headers the staging call returned (the signature covers them), and it is
+   * unauthenticated by design.
+   */
+  async putUploadBytes(uploadUrl: string, content: Buffer, headers: Record<string, string>): Promise<void> {
+    let response: Response;
+    try {
+      response = await this.fetchImpl(uploadUrl, {
+        method: 'PUT',
+        headers,
+        body: new Uint8Array(content),
+        signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
+      });
+    } catch (error) {
+      throw new KaneoError(`asset upload failed: ${(error as Error).message}`, 0);
+    }
+    if (!response.ok) {
+      throw new KaneoError(
+        `asset upload returned ${response.status}: ${await errorMessage(response)}`,
+        response.status,
+      );
+    }
+  }
+
+  /** Confirms the upload and turns the staged asset into a permanent task asset. */
+  finalizeDraftAsset(projectId: string, file: FileUpload, key: string): Promise<FinalizedAsset> {
+    return this.request<FinalizedAsset>('POST', `/task/draft-upload/${encodeURIComponent(projectId)}/finalize`, {
+      key,
+      filename: file.filename,
+      contentType: file.contentType,
+      size: file.size,
+      surface: 'description',
     });
   }
 

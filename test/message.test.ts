@@ -74,6 +74,22 @@ describe('parseMessage', () => {
     expect((await parseMessage(raw)).description).toBe('Plain text');
   });
 
+  it('extracts file attachments with a fallback filename', async () => {
+    const mail = await parseMessage(
+      rawMail({
+        attachments: [
+          { filename: 'logo.png', contentType: 'image/png', content: 'PNGDATA' },
+          { contentType: 'application/pdf', content: 'PDFDATA' },
+        ],
+      }),
+    );
+    expect(mail.attachments).toHaveLength(2);
+    expect(mail.attachments[0]).toMatchObject({ filename: 'logo.png', contentType: 'image/png' });
+    expect(mail.attachments[0]!.size).toBe(Buffer.byteLength('PNGDATA'));
+    expect(mail.attachments[1]!.filename).toBe('attachment-2');
+    expect(mail.attachments[1]!.contentType).toBe('application/pdf');
+  });
+
   it('falls back to a placeholder title', async () => {
     expect((await parseMessage(rawMail({ subject: '' }))).title).toBe('(no subject)');
   });

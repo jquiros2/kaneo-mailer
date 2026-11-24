@@ -3,6 +3,13 @@ import { simpleParser, type HeaderValue } from 'mailparser';
 export const PROJECT_HEADER = 'x-kaneo-project-id';
 export const COLUMN_HEADER = 'x-kaneo-column';
 
+export interface MailAttachment {
+  filename: string;
+  contentType: string;
+  size: number;
+  content: Buffer;
+}
+
 export interface TaskMail {
   /** Kaneo project to create the task in. Null when the header is missing. */
   projectId: string | null;
@@ -12,6 +19,8 @@ export interface TaskMail {
   description: string;
   /** ISO timestamp parsed from the subject, if it contains one. */
   dueDate: string | null;
+  /** Every non-empty file part of the message, inline images included. */
+  attachments: MailAttachment[];
 }
 
 function headerText(value: HeaderValue | undefined): string | null {
@@ -51,11 +60,21 @@ export async function parseMessage(source: Buffer | string): Promise<TaskMail> {
   const mail = await simpleParser(source);
   const subject = mail.subject?.trim() ?? '';
 
+  const attachments: MailAttachment[] = (mail.attachments ?? [])
+    .filter((part) => Buffer.isBuffer(part.content) && part.content.length > 0)
+    .map((part, index) => ({
+      filename: part.filename?.trim() || `attachment-${index + 1}`,
+      contentType: part.contentType || 'application/octet-stream',
+      size: part.content.length,
+      content: part.content,
+    }));
+
   return {
     projectId: headerText(mail.headers.get(PROJECT_HEADER)),
     column: headerText(mail.headers.get(COLUMN_HEADER)),
     title: subject || '(no subject)',
     description: mail.text?.trim() ?? '',
     dueDate: extractDueDate(subject),
+    attachments,
   };
 }
